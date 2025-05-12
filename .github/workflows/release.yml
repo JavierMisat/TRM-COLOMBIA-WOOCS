@@ -1,0 +1,87 @@
+name: Create Release and Upload Plugin ZIP
+
+# Disparador: Se ejecuta cuando se empuja un nuevo tag que coincida con los patrones
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'  # Ej: v1.0.0, v1.2.3, v1.2.3-beta
+      - '[0-9]+.[0-9]+.[0-9]+*'   # Ej: 1.0.0, 1.2.3 (sin la 'v')
+
+jobs:
+  build_and_release:
+    name: Build and Release Plugin
+    runs-on: ubuntu-latest # Usar la última versión estable de Ubuntu
+
+    permissions:
+      contents: write # Necesario para que la acción pueda crear releases y subir archivos
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        # fetch-depth: 0 # Descomentar si necesitas el historial completo para generar changelogs, etc.
+
+      - name: Get repository name and version from tag
+        id: repo_details
+        run: |
+          echo "slug=$(echo ${{ github.repository }} | awk -F/ '{print $2}')" >> $GITHUB_OUTPUT
+          echo "version_tag=$(echo ${{ github.ref_name }})" >> $GITHUB_OUTPUT # github.ref_name es el nombre del tag (ej. v1.0.0)
+
+      # --- PASOS OPCIONALES DE COMPILACIÓN ---
+      # Si tu plugin usa Composer para dependencias PHP (que no son de desarrollo)
+      # - name: Install PHP Dependencies (Composer)
+      #   if: hashFiles('composer.json') != '' # Solo si existe composer.json
+      #   run: composer install --no-dev --prefer-dist --optimize-autoloader
+      #
+      # Si tu plugin usa NPM/Yarn para compilar assets (JS/CSS)
+      # - name: Install Node Dependencies and Build Assets
+      #   if: hashFiles('package.json') != '' # Solo si existe package.json
+      #   run: |
+      #     npm ci
+      #     npm run build # O el script que uses para compilar (ej. production, release)
+      # --- FIN DE PASOS OPCIONALES DE COMPILACIÓN ---
+
+      - name: Create Plugin ZIP
+        id: create_zip
+        run: |
+          PLUGIN_SLUG="${{ steps.repo_details.outputs.slug }}" # Asume que el nombre del repo es el slug del plugin
+          VERSION_TAG="${{ steps.repo_details.outputs.version_tag }}"
+          
+          # Quita la 'v' del inicio del tag si existe, para el nombre del archivo ZIP
+          VERSION_NUM=$(echo $VERSION_TAG | sed 's/^v//')
+          
+          # Nombre del archivo ZIP (ej. mi-plugin.1.0.0.zip)
+          ZIP_FILENAME="${PLUGIN_SLUG}.${VERSION_NUM}.zip"
+          
+          # Directorio temporal para empaquetar
+          TEMP_PACKAGE_DIR="plugin_package_temp"
+          
+          # Crea la estructura de directorios: TEMP_PACKAGE_DIR/plugin-slug/
+          mkdir -p "${TEMP_PACKAGE_DIR}/${PLUGIN_SLUG}"
+          
+          # Usa 'git archive' para copiar solo los archivos rastreados por Git en el tag actual.
+          # Esto respeta tu .gitignore y asegura que solo los archivos del plugin se incluyan.
+          # Los archivos se extraerán dentro de TEMP_PACKAGE_DIR/PLUGIN_SLUG/
+          git archive "${VERSION_TAG}" | tar -x -C "${TEMP_PACKAGE_DIR}/${PLUGIN_SLUG}"
+          
+          # Crea el archivo ZIP desde el directorio temporal
+          # Esto asegura que el ZIP contenga una carpeta raíz con el nombre del plugin
+          (cd "${TEMP_PACKAGE_DIR}" && zip -r "../${ZIP_FILENAME}" "${PLUGIN_SLUG}")
+          
+          # Limpia el directorio temporal
+          rm -rf "${TEMP_PACKAGE_DIR}"
+          
+          echo "zip_name=${ZIP_FILENAME}" >> $GITHUB_OUTPUT
+          echo "Plugin empaquetado como ${ZIP_FILENAME}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2 # Acción para crear releases
+        with:
+          files: ${{ steps.create_zip.outputs.zip_name }} # Archivo(s) a adjuntar al release
+          # El nombre del release y el tag se tomarán automáticamente del tag que disparó el workflow.
+          # Puedes personalizarlos si quieres:
+          # name: "Release ${{ steps.repo_details.outputs.version_tag }}"
+          # body: |
+          #   Esta es la versión ${{ steps.repo_details.outputs.version_tag }} de ${{ steps.repo_details.outputs.slug }}.
+          #   (Aquí podrías incluir un changelog generado automáticamente si lo configuras)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Token provisto por GitHub para autenticar la acción
