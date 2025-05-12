@@ -1,0 +1,39 @@
+# WordPress
+/wp-admin/
+/wp-includes/
+/wp-content/plugins/!trm-colombia-woocommerce/ # Excluye tu propio plugin
+/wp-content/themes/
+/wp-content/uploads/
+/wp-content/upgrade/
+/wp-content/mu-plugins/ # A menos que este sea tu plugin
+wp-config.php # ¡Muy importante! Contiene credenciales de la base de datos
+.htaccess
+license.txt
+readme.html
+wp-activate.php
+wp-blog-header.php
+wp-comments-post.php
+wp-config-sample.php
+wp-cron.php
+wp-links-opml.php
+wp-load.php
+wp-login.php
+wp-mail.php
+wp-settings.php
+wp-signup.php
+wp-trackback.php
+xmlrpc.php
+index.php # El index.php de la raíz de WordPress
+
+# Archivos de Composer
+/vendor/
+composer.lock
+
+# Archivos de Node
+/node_modules/
+npm-debug.log
+yarn-error.log
+
+# Archivos del sistema operativo
+.DS_Store
+Thumbs.db
