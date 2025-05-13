@@ -2,9 +2,9 @@
 /**
  * Plugin Name: TRM Colombia for WooCommerce (Custom & Improved)
  * Description: Actualiza la tasa de cambio USD/COP diariamente usando la TRM oficial de la Superintendencia Financiera de Colombia. Se integra como un agregador en WOOCS.
- * Version: 2.0.1
- * Author: Javier Misat
- * Author URI: https://github.com/jmisat
+ * Version: 2.0.6
+ * Author: Javier Misat 
+ * Author URI: https://github.com/javiermisat
  * Text Domain: trm-colombia-woocs
  * License: GPL-2.0-or-later
  * License URI: http://www.gnu.org/licenses/gpl-2.0.html
@@ -16,10 +16,21 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit; // Salir si se accede directamente.
 }
 
+/**
+ * Declara la compatibilidad con High-Performance Order Storage (HPOS).
+ */
+add_action( 'before_woocommerce_init', function() {
+    if ( class_exists( \Automattic\WooCommerce\Utilities\FeaturesUtil::class ) ) {
+        \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__, true );
+    }
+} );
+
 define( 'TRM_COLOMBIA_WOOCS_PATH', plugin_dir_path( __FILE__ ) );
 define( 'TRM_COLOMBIA_WOOCS_URL', plugin_dir_url( __FILE__ ) );
 define( 'TRM_COLOMBIA_WOOCS_AGGREGATOR_ID', 'trm_colombia_superfinanciera' );
-define( 'TRM_COLOMBIA_WOOCS_TRANSIENT_KEY', 'trm_colombia_rate_v2' ); // Se mantiene v2 para compatibilidad de transients existentes.
+// El textdomain se cargará en 'plugins_loaded' con prioridad 8, antes de que esta constante se use efectivamente.
+define( 'TRM_COLOMBIA_WOOCS_AGGREGATOR_NAME', __( 'TRM Colombia (Superfinanciera)', 'trm-colombia-woocs' ) );
+define( 'TRM_COLOMBIA_WOOCS_TRANSIENT_KEY', 'trm_colombia_rate_v2' );
 define( 'TRM_COLOMBIA_WOOCS_TRANSIENT_EXPIRATION', 12 * HOUR_IN_SECONDS );
 
 /**
@@ -27,23 +38,16 @@ define( 'TRM_COLOMBIA_WOOCS_TRANSIENT_EXPIRATION', 12 * HOUR_IN_SECONDS );
  */
 final class TRM_Colombia_WOOCS_Plugin {
 
-    /**
-     * Instancia única de la clase.
-     * @var TRM_Colombia_WOOCS_Plugin
-     */
     private static $instance;
 
-    /**
-     * Constructor privado para evitar la creación directa de objetos.
-     */
     private function __construct() {
-        add_action( 'plugins_loaded', array( $this, 'init' ), 20 ); // Prioridad 20 para asegurar que WOOCS pueda estar cargado.
+        // Cargar el textdomain en 'plugins_loaded' con prioridad 8 (antes de plugin_setup).
+        add_action( 'plugins_loaded', array( $this, 'load_textdomain_action' ), 8 );
+        
+        // Inicializar el resto de la funcionalidad del plugin en 'plugins_loaded' con prioridad 9.
+        add_action( 'plugins_loaded', array( $this, 'plugin_setup' ), 9 );
     }
 
-    /**
-     * Obtiene la instancia única de la clase.
-     * @return TRM_Colombia_WOOCS_Plugin
-     */
     public static function get_instance(): TRM_Colombia_WOOCS_Plugin {
         if ( null === self::$instance ) {
             self::$instance = new self();
@@ -52,61 +56,66 @@ final class TRM_Colombia_WOOCS_Plugin {
     }
 
     /**
-     * Inicializa el plugin.
-     * Carga el text domain y verifica las dependencias.
+     * Carga el textdomain del plugin.
+     * Se engancha al hook 'plugins_loaded' de WordPress con prioridad 8.
      */
-    public function init(): void {
+    public function load_textdomain_action(): void {
         load_plugin_textdomain( 'trm-colombia-woocs', false, dirname( plugin_basename( __FILE__ ) ) . '/languages' );
+        error_log('TRM Colombia WOOCS: Textdomain loaded at plugins_loaded priority 8.');
+    }
+
+    /**
+     * Configuración principal del plugin después de que todos los plugins estén cargados.
+     * Se engancha a 'plugins_loaded' con prioridad 9.
+     */
+    public function plugin_setup(): void {
+        error_log('TRM Colombia WOOCS: plugin_setup called at plugins_loaded priority 9.');
 
         if ( ! $this->is_woocs_active() ) {
+            error_log('TRM Colombia WOOCS: WOOCS plugin not detected as active in plugin_setup. TRM plugin will not initialize fully.');
             add_action( 'admin_notices', array( $this, 'show_woocs_not_active_notice' ) );
             return;
         }
         
+        error_log('TRM Colombia WOOCS: WOOCS plugin detected in plugin_setup. Initializing TRM hooks.');
+
         if ( ! class_exists( 'SoapClient' ) ) {
             add_action( 'admin_notices', array( $this, 'show_soap_not_active_notice' ) );
-            // No retornamos aquí, ya que el admin necesita ver el aviso.
-            // La funcionalidad de obtención de TRM fallará y se registrará.
         }
 
-        // Registrar nuestro agregador con WOOCS usando el filtro apropiado.
-        add_filter( 'woocs_currency_aggregators', array( $this, 'add_trm_aggregator_to_list' ) );
+        // Registrar el agregador usando el filtro 'woocs_announce_aggregator'
+        add_filter( 'woocs_announce_aggregator', array( $this, 'add_custom_aggregator_to_list' ) );
+        error_log('TRM Colombia WOOCS: woocs_announce_aggregator filter ADDED in plugin_setup.');
+
 
         // Filtrar las tasas de WOOCS si nuestro agregador está seleccionado
         add_filter( 'woocs_currency_rates_custom', array( $this, 'filter_woocs_currency_rates' ), 10, 2 );
     }
 
-    /**
-     * Verifica si el plugin WOOCS - WooCommerce Currency Switcher está activo.
-     * @return bool True si WOOCS está activo, false en caso contrario.
-     */
     private function is_woocs_active(): bool {
         if ( ! function_exists( 'is_plugin_active' ) ) {
             include_once ABSPATH . 'wp-admin/includes/plugin.php';
         }
-        // Comprobar varias posibles rutas del plugin WOOCS
         $possible_woocs_paths = array(
-            'woocommerce-currency-switcher/index.php', // Ruta común
-            'currency-switcher/index.php', 
+            'woocommerce-currency-switcher/index.php', 
+            'currency-switcher/index.php',             
         );
         foreach ($possible_woocs_paths as $path) {
             if (is_plugin_active($path)) {
+                error_log('TRM Colombia WOOCS: Detected WOOCS active with path: ' . $path . ' in is_woocs_active.');
                 return true;
             }
         }
+        error_log('TRM Colombia WOOCS: WOOCS plugin not found active with checked paths in is_woocs_active: ' . implode(', ', $possible_woocs_paths));
         return false;
     }
 
-    /**
-     * Muestra un aviso en el panel de administración si WOOCS no está activo.
-     */
     public function show_woocs_not_active_notice(): void {
         ?>
         <div class="notice notice-error is-dismissible">
             <p>
                 <?php
                 printf(
-                    /* translators: %s: Plugin name */
                     esc_html__( 'El plugin "%s" requiere que el plugin WOOCS - WooCommerce Currency Switcher esté activo y configurado.', 'trm-colombia-woocs' ),
                     '<strong>TRM Colombia for WooCommerce (Custom & Improved)</strong>'
                 );
@@ -116,16 +125,12 @@ final class TRM_Colombia_WOOCS_Plugin {
         <?php
     }
     
-    /**
-     * Muestra un aviso en el panel de administración si la extensión SOAP no está activa.
-     */
     public function show_soap_not_active_notice(): void {
         ?>
         <div class="notice notice-error is-dismissible">
             <p>
                 <?php
                 printf(
-                    /* translators: %s: Plugin name */
                     esc_html__( 'El plugin "%s" requiere que la extensión SOAP de PHP esté habilitada en su servidor para funcionar correctamente.', 'trm-colombia-woocs' ),
                     '<strong>TRM Colombia for WooCommerce (Custom & Improved)</strong>'
                 );
@@ -135,77 +140,52 @@ final class TRM_Colombia_WOOCS_Plugin {
         <?php
     }
 
-    /**
-     * Añade el agregador TRM Colombia a la lista de agregadores de WOOCS.
-     * @param array $aggregators Array de agregadores existentes.
-     * @return array Array de agregadores modificado.
-     */
-    public function add_trm_aggregator_to_list( array $aggregators ): array {
-        $aggregators[TRM_COLOMBIA_WOOCS_AGGREGATOR_ID] = __( 'TRM Colombia (Superfinanciera)', 'trm-colombia-woocs' );
+    public function add_custom_aggregator_to_list( array $aggregators ): array {
+        error_log('TRM Colombia WOOCS: add_custom_aggregator_to_list filter CALLBACK EXECUTED (using woocs_announce_aggregator).'); 
+        
+        $aggregators[TRM_COLOMBIA_WOOCS_AGGREGATOR_ID] = TRM_COLOMBIA_WOOCS_AGGREGATOR_NAME; 
+        
+        error_log('TRM Colombia WOOCS: Aggregators list after adding custom one: ' . print_r($aggregators, true));
         return $aggregators;
     }
 
-    /**
-     * Filtra las tasas de cambio de WOOCS si nuestro agregador está seleccionado.
-     * @param array|float $rates Tasas de cambio existentes o tasa de la moneda anterior.
-     * @param string $currency_code_being_processed Código de la moneda actual (ej. 'USD').
-     * @return array|float Tasas de cambio modificadas o la tasa específica.
-     */
     public function filter_woocs_currency_rates( $rates, string $currency_code_being_processed ) {
         global $WOOCS;
 
-        if ( ! is_object( $WOOCS ) || 
-             ! isset( $WOOCS->current_currency_aggregator ) ||
-             $WOOCS->current_currency_aggregator !== TRM_COLOMBIA_WOOCS_AGGREGATOR_ID ) {
+        if ( ! is_object( $WOOCS ) || ! isset($WOOCS->current_currency_aggregator) || $WOOCS->current_currency_aggregator !== TRM_COLOMBIA_WOOCS_AGGREGATOR_ID ) {
             return $rates; 
         }
         
+        error_log('TRM Colombia WOOCS: filter_woocs_currency_rates called for currency: ' . $currency_code_being_processed . ' with selected aggregator.');
+
         if ( 'USD' === $currency_code_being_processed ) {
-            $trm_value = get_transient( TRM_COLOMBIA_WOOCS_TRANSIENT_KEY );
+            $trm = get_transient( TRM_COLOMBIA_WOOCS_TRANSIENT_KEY );
 
-            if ( false === $trm_value ) {
+            if ( false === $trm || ! is_numeric( $trm ) ) { 
+                error_log('TRM Colombia WOOCS: TRM not in transient or invalid. Fetching from Superfinanciera.');
                 $fetched_trm = $this->fetch_trm_from_superfinanciera();
-
                 if ( is_wp_error( $fetched_trm ) ) {
                     error_log( sprintf(
                         'TRM Colombia WOOCS Error: No se pudo obtener la TRM. Código: %s, Mensaje: %s',
                         $fetched_trm->get_error_code(),
                         $fetched_trm->get_error_message()
                     ) );
-                    
-                    // Si $rates es un array y contiene la tasa para USD, devolverla.
-                    if (is_array($rates) && isset($rates[$currency_code_being_processed])) {
-                        return $rates[$currency_code_being_processed];
-                    }
-                    // Si $rates es un float (porque WOOCS a veces pasa la tasa de la moneda anterior),
-                    // y no es para USD, no podemos usarla.
-                    // Devolver 0 o una tasa por defecto si no se puede obtener y no hay valor previo.
-                    return 0; 
+                    return $rates; 
                 }
                 
-                $trm_value = $fetched_trm;
-                set_transient( TRM_COLOMBIA_WOOCS_TRANSIENT_KEY, $trm_value, TRM_COLOMBIA_WOOCS_TRANSIENT_EXPIRATION );
+                $trm = $fetched_trm;
+                set_transient( TRM_COLOMBIA_WOOCS_TRANSIENT_KEY, $trm, TRM_COLOMBIA_WOOCS_TRANSIENT_EXPIRATION );
+                error_log('TRM Colombia WOOCS: TRM fetched and set in transient: ' . $trm);
+            } else {
+                error_log('TRM Colombia WOOCS: TRM retrieved from transient: ' . $trm);
             }
             
-            return floatval( $trm_value ); 
+            return floatval( $trm );
         }
 
-        // Manejo para otras monedas o cuando $rates es un array.
-        if (is_array($rates)) {
-            // Si $rates es un array, devolver la tasa para la moneda actual si existe,
-            // o el array completo si este filtro se usa para obtener todas las tasas.
-            // WOOCS puede llamar a este filtro de forma que espera el array completo modificado.
-            return $rates[$currency_code_being_processed] ?? $rates; 
-        }
-        // Si $rates no es un array, se asume que es la tasa de una moneda anterior,
-        // y como no es USD, la devolvemos sin cambios.
-        return $rates; 
+        return $rates;
     }
 
-    /**
-     * Obtiene la TRM desde el servicio web de la Superintendencia Financiera de Colombia.
-     * @return float|WP_Error La TRM como float en caso de éxito, o WP_Error en caso de fallo.
-     */
     private function fetch_trm_from_superfinanciera() {
         if ( ! class_exists( 'SoapClient' ) ) {
             return new WP_Error(
@@ -218,17 +198,16 @@ final class TRM_Colombia_WOOCS_Plugin {
         $query_date = date( 'Y-m-d' ); 
 
         $soap_options = array(
-            'trace' => true, 
+            'trace' => true,
             'exceptions' => true, 
             'connection_timeout' => 15, 
             'cache_wsdl' => WSDL_CACHE_MEMORY, 
-            'user_agent' => 'WordPress TRM Colombia Plugin/' . $this->get_plugin_version(), 
         );
 
         try {
             $soap_client = new SoapClient( $wsdl_url, $soap_options );
-            $call_params = array( 'tcrmQueryAssociatedDate' => $query_date );
-            $response    = $soap_client->__soapCall( 'queryTCRM', array( $call_params ) );
+            $params      = array( 'tcrmQueryAssociatedDate' => $query_date );
+            $response    = $soap_client->__soapCall( 'queryTCRM', array( $params ) );
 
             $trm_value_candidate = null;
             if (isset($response->return, $response->return->value)) {
@@ -267,7 +246,13 @@ final class TRM_Colombia_WOOCS_Plugin {
                 );
             }
         } catch ( SoapFault $e ) {
-            error_log( 'TRM Colombia WOOCS SoapFault: ' . $e->getMessage() . ' | Trace: ' . $e->getTraceAsString() );
+            error_log( 'TRM Colombia WOOCS SoapFault: ' . $e->getMessage() . ' | WSDL: ' . $wsdl_url );
+            if (isset($soap_client)) {
+                error_log( 'TRM Colombia WOOCS Last SOAP Request Headers: ' . print_r($soap_client->__getLastRequestHeaders(), true) );
+                error_log( 'TRM Colombia WOOCS Last SOAP Request: ' . print_r($soap_client->__getLastRequest(), true) );
+                error_log( 'TRM Colombia WOOCS Last SOAP Response Headers: ' . print_r($soap_client->__getLastResponseHeaders(), true) );
+                error_log( 'TRM Colombia WOOCS Last SOAP Response: ' . print_r($soap_client->__getLastResponse(), true) );
+            }
             return new WP_Error(
                 'soap_fault',
                 sprintf(
@@ -277,7 +262,7 @@ final class TRM_Colombia_WOOCS_Plugin {
                 )
             );
         } catch ( Exception $e ) {
-            error_log( 'TRM Colombia WOOCS Exception: ' . $e->getMessage() . ' | Trace: ' . $e->getTraceAsString() );
+            error_log( 'TRM Colombia WOOCS Generic Exception: ' . $e->getMessage() );
             return new WP_Error(
                 'generic_fetch_error',
                 sprintf(
@@ -286,23 +271,6 @@ final class TRM_Colombia_WOOCS_Plugin {
                 )
             );
         }
-    }
-    
-    /**
-     * Obtiene la versión del plugin desde la cabecera del archivo.
-     * @return string Versión del plugin.
-     */
-    private function get_plugin_version(): string {
-        if ( ! function_exists( 'get_plugin_data' ) ) {
-            require_once ABSPATH . 'wp-admin/includes/plugin.php';
-        }
-        // Asegúrate de que el plugin principal es __FILE__ dentro de esta clase.
-        $plugin_file = TRM_COLOMBIA_WOOCS_PATH . basename(dirname(TRM_COLOMBIA_WOOCS_PATH)) . '.php'; // Asume que el archivo principal está un nivel arriba o tiene un nombre específico
-        // Para ser más robusto, si el archivo principal es este mismo:
-        $plugin_file_path = __FILE__; 
-        
-        $plugin_data = get_plugin_data( $plugin_file_path );
-        return $plugin_data['Version'] ?? '1.0.0'; // Fallback a una versión por defecto si no se puede leer
     }
 }
 
